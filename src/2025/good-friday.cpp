@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <cassert>
 #include <climits>
+#include <cmath>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -15,21 +17,31 @@ struct GeneticMap {
   std::multimap<Plant, std::pair<Cost, Plant>> links;
 };
 
-GeneticMap parse_input() {
+using Field = std::vector<std::string>;
+
+std::pair<GeneticMap, Field> parse_input() {
   GeneticMap result{};
 
   std::vector<std::string> lines{};
+  std::vector<std::string> field{};
 
   std::string line;
+  bool in_field = false;
   while (std::getline(std::cin, line)) {
-    lines.emplace_back(line);
+    if (line.empty() and not lines.empty()) {
+      in_field = true; continue;
+    }
+    if(in_field)
+      field.emplace_back(line);
+    else
+      lines.emplace_back(line);
+    
   }
 
   auto plants = std::map<Plant, std::pair<int, int>>{};
 
   // First get all the plant positions on the map
   for (const auto& [l, line]: std::ranges::views::enumerate(lines)) {
-    if( line == "" ) break;
     for (auto [c, maybe_plant]: std::ranges::views::enumerate(line)) {
       if (maybe_plant >= 'A' and maybe_plant <= 'z') plants[maybe_plant] = {l, c};
     }
@@ -91,7 +103,7 @@ GeneticMap parse_input() {
   result.plants = std::vector<Plant>{};
   for (auto c: plants) result.plants.push_back(c.first);
 
-  return result;
+  return std::make_pair(std::move(result), std::move(field));
 }
 
 std::map<Plant, unsigned short> categorize(const GeneticMap& input) {
@@ -126,7 +138,7 @@ std::vector<Plant> get_extants(const GeneticMap& input) {
   return res;
 }
 
-Cost distance(const GeneticMap& input, Plant from, Plant to) {
+std::optional<Cost> distance(const GeneticMap& input, Plant from, Plant to) {
   std::vector<std::tuple<
     Plant,                  // Current
     Cost,                   // Current Cost
@@ -134,12 +146,21 @@ Cost distance(const GeneticMap& input, Plant from, Plant to) {
     std::vector<Plant>      // Visited
   >> explore_stack;
 
-  auto best_cost = INT_MAX;
+  if (from == to) return std::make_optional(0);
 
-  // Plant is extant, there is exactly one link
-  const auto first_link = *input.links.find(from);
-  explore_stack.emplace_back(
-    first_link.first, 0, first_link.second, std::vector<Plant>{from});
+  // static constexpr auto line_size = 26;
+  // static std::array<unsigned short, line_size * line_size> distances{};
+
+  // if (distances[(from-0x30)*line_size + (to - 0x30)] != 0)
+  //   return distances[(from-0x30)*line_size + (to - 0x30)];
+
+  std::optional<Cost> best_cost = std::nullopt;
+
+  const auto eqr = input.links.equal_range(from);
+  for (auto it = eqr.first; it != eqr.second; it++) {
+    explore_stack.emplace_back(
+      it->first, 0, it->second, std::vector<Plant>{from});
+  }
 
   while (not explore_stack.empty()) {
     auto [plant, cost, link, visited] = explore_stack.back();
@@ -149,7 +170,7 @@ Cost distance(const GeneticMap& input, Plant from, Plant to) {
      plant = link.second;
 
     if (plant == to) {
-      best_cost = std::min(best_cost, cost);
+      best_cost.emplace(best_cost ? std::min(*best_cost, cost) : cost);
       continue;
     }
 
@@ -164,25 +185,162 @@ Cost distance(const GeneticMap& input, Plant from, Plant to) {
     }
   }
 
+  // if (best_cost)
+  //   distances[(from-0x30)*line_size + (to - 0x30)] = *best_cost;
   return best_cost;
 }
+
+Cost best_distance(const GeneticMap& input, const std::map<Plant, unsigned short>& categories,
+                  const std::vector<Plant>& extant,
+                  Plant to) {
+  Cost best_distance = INT_MAX;
+  const auto cat_to = categories.at(to);
+  for (const auto e: extant) {
+    if (categories.at(e) == cat_to)
+      best_distance = std::min(best_distance, distance(input, e, to).value());
+  }
+
+  return best_distance;
+}
+
+std::string get_categories(const std::map<Plant, unsigned short>& categories,
+                           std::string line) {
+  for (auto& c: line) {
+    c = categories.at(c);
+  }
+  return line;
+}
+
+Cost line_cost(const GeneticMap &input,
+               const std::map<Plant, unsigned short> &categories,
+               const std::vector<Plant> &extant, const std::string &line,
+               const std::string expected) {
+  auto expected_categories = get_categories(categories, expected);
+
+  static constexpr auto placeholder = '\1';
+
+  std::map<std::string, Cost> working_lines{{line, 0}};
+  std::map<std::string, Cost> new_working_lines{};
+
+  const auto insert = [&new_working_lines](std::string line, Cost cost) {
+    const auto it = new_working_lines.find(line);
+    if (it != new_working_lines.end())
+      new_working_lines[line] = std::min(new_working_lines[line], cost);
+    else
+      new_working_lines[line] = cost;
+  };
+
+  // Remove extra plants if the line is too long
+  for (auto i = expected.size(); i < line.size(); i++) {
+    new_working_lines.clear();
+    for (auto [wl, cost] : working_lines) {
+      for (auto c = 0uz; c < wl.size(); c++) {
+        auto nl = wl;
+        nl.erase(nl.begin() + c);
+        insert(nl, cost + 300);
+      }
+    }
+    std::swap(new_working_lines, working_lines);
+  }
+
+  // Add placholders if the line is too long
+  for (auto i = line.size(); i < expected.size(); i++) {
+    new_working_lines.clear();
+    for (auto [wl, cost] : working_lines) {
+      for (auto c = 0uz; c <= wl.size(); c++) {
+        auto nl = wl;
+        nl.insert(nl.begin() + c, placeholder);
+        insert(nl, cost);
+      }
+    }
+    std::swap(new_working_lines, working_lines);
+  }
+
+  for (auto i = 0u; i < expected.size(); i++) {
+    new_working_lines.clear();
+    for (auto [wl, cost] : working_lines) {
+    assert(wl.size() == expected.size());
+
+      // Keep configuration as is
+      insert(wl, cost);
+
+      // Remove letter and add placeholder
+      auto nl = wl;
+      nl.erase(nl.begin() + i);
+      for (auto j = 0u; j <= nl.size(); j++) {
+        auto nnl = nl;
+        nnl.insert(nnl.begin() + j, placeholder);
+        insert(nnl, cost + 300);
+      }
+    }
+    std::swap(new_working_lines, working_lines);
+  }
+
+  Cost min = INT_MAX;
+  for (const auto &[line, base_cost] : working_lines) {
+    auto i = 0;
+    auto cost = base_cost;
+    assert(line.size() == expected.size());
+    for (auto c : line) {
+      if (c != placeholder and categories.at(c) == expected_categories[i])
+        cost += distance(input, c, expected[i]).value();
+      else if (c == placeholder)
+        cost += best_distance(input, categories, extant, expected[i]);
+      else {
+        cost = INT_MAX;
+        break;
+      }
+      i++;
+    }
+    min = std::min(cost, min);
+  }
+
+  return min;
+}
+
+const auto expected = std::array{
+  "XVXVXVXBX",
+  "VXVXVXVXB",
+  "XTXVXAXBX",
+  "TXVXXXAXB",
+  "XTXVWAXBX",
+  "TXVXVXAXB",
+  "XTXVXAXBX",
+  "TXAXAXAXA",
+  "XTXAXAXAX",
+};
 
 int main(int, char** argv) {
   const auto puzzle_number = *argv[1] - 0x30;
 
-  const auto input      = parse_input();
-  const auto categories = categorize(input);
-  const auto extants    = get_extants(input);
+  const auto [input, field]      = parse_input();
+  const auto categories          = categorize(input);
+  const auto extants             = get_extants(input);
 
-  auto sum = 0;
+  if (puzzle_number == 1) {
+    auto sum = 0;
 
-  for (auto i = 0u; i < extants.size(); i++) {
-    for (auto j = i+1; j < extants.size(); j++) {
-      auto p_i = extants[i]; auto p_j = extants[j];
-      if (categories.at(p_i) != categories.at(p_j)) continue;
-      sum += distance(input, p_i, p_j);
+    for (auto i = 0u; i < extants.size(); i++) {
+      for (auto j = i+1; j < extants.size(); j++) {
+        auto p_i = extants[i]; auto p_j = extants[j];
+        if (categories.at(p_i) != categories.at(p_j)) continue;
+        sum += distance(input, p_i, p_j).value();
+      }
     }
+    std::cout << sum;
   }
 
-  std::cout << sum;
+  // Puzzle 2 is currently not producing the correct result
+  if (puzzle_number == 2) {
+    auto sum = 0;
+
+    for (auto i = 0u; i < expected.size(); i++) {
+      auto lc = line_cost(input, categories, extants, field[i], expected[i]);
+      // std::cout << field[i] << " "  << lc << "\n";
+      sum += lc;
+    }
+    std::cout << sum;
+  }
+
+  return 0;
 }
